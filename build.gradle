@@ -1,0 +1,34 @@
+apply plugin: "java"
+apply plugin: "idea"
+apply plugin: "eclipse"
+apply plugin: "application"
+
+task wrapper(type: Wrapper) {
+    gradleVersion = '2.2'
+}
+
+repositories {
+    mavenCentral()
+}
+
+configurations {
+    internal
+    external
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+dependencies {
+    internal 'org.jdom:jdom2:2.0.+'
+    internal 'jaxen:jaxen:1.1.+'
+    internal 'ch.qos.logback:logback-core:1.1.+'
+    internal 'ch.qos.logback:logback-classic:1.1.+'
+    internal 'org.slf4j:slf4j-api:1.7.+'
+    internal 'commons-io:commons-io:2.4'
+
+    testCompile 'junit:junit:4.+'
+
+    compile configurations.internal
+}
