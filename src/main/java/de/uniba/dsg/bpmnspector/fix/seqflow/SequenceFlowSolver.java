@@ -1,6 +1,10 @@
 package de.uniba.dsg.bpmnspector.fix.seqflow;
 
-import org.jdom2.*;
+import org.jdom2.Document;
+import org.jdom2.Element;
+import org.jdom2.JDOMException;
+import org.jdom2.Namespace;
+import org.jdom2.filter.Filter;
 import org.jdom2.filter.Filters;
 import org.jdom2.input.SAXBuilder;
 import org.jdom2.located.LocatedJDOMFactory;
@@ -13,7 +17,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -43,67 +46,99 @@ public class SequenceFlowSolver {
 
     public SequenceFlowSolver() {
         builder = new SAXBuilder();
+        builder.setJDOMFactory(new LocatedJDOMFactory());
     }
 
-    public void fixSequenceFlowFaults(Path path) throws IOException {
+    /**
+     * Checks whether a BPMN file determined by the path uses the correct sequenceFlow referencing paradigm
+     * defined in the BPMN spec. I.e., each element referenced by a SequenceFlow using the sourceRef or targetRef
+     * attribute must cross reference the sequenceFlow using an incoming resp. outgoing sub element.
+     * <p>
+     * If the BPMN process violates this constraint, a new File with proposed fixes is created. It is stored in the
+     * folder of the original file and prefixed with &quot;fixed_&quot;
+     *
+     * @param path the path of the BPMN file
+     * @throws IOException              thrown if the creation of the fixed file fails
+     * @throws IllegalArgumentException thrown if the file at path is not a valid BPMN file
+     */
+    public void fixSequenceFlowFaults(Path path) throws IOException, IllegalArgumentException {
         Document doc = loadFile(path);
 
         // get all SequenceFlow elements
-        List<Element> allSequenceFlows = getAllSequenceFlows(doc);
+        List<Element> allSequenceFlows = getAllElementsByFilter(doc, Filters.element(SEQ_FLOW, BPMNNAMESPACE));
 
-        LOGGER.info("AllSequenceFlows size:" + allSequenceFlows.size());
+        LOGGER.info("Found " + allSequenceFlows.size() + " sequenceFlow elements.");
 
         // get all Elements with IDs to be used in the following checks
         Map<String, Element> allElementsWithIds = createIdElementMap(doc);
 
+        boolean hasBeenChanged = false;
+
         // check for each SequenceFlow element whether the referenced element cross reference the SeqFlow
         // if not - add incoming/outgoing sub element
-        for(Element seqFlow : allSequenceFlows) {
-            LOGGER.info("Trying to find elems for seqFlow with ID"+seqFlow.getAttributeValue(ID));
-            // get element referenced by sourceRef attribute
-            String sourceRef = seqFlow.getAttributeValue(SOURCE_REF);
-            if(sourceRef != null && allElementsWithIds.get(sourceRef) != null) {
-                Element elem = allElementsWithIds.get(sourceRef);
-                // check element regarding outgoing subelement
-                if(!elem.getChildren(OUTGOING, BPMNNAMESPACE).stream()
-                            .anyMatch(e -> seqFlow.getAttributeValue(ID).equals(e.getText()))) {
-                    // if no element contains seqFlow ID
-                    // add new element with ID
-                    LOGGER.info("Adding Element outgoing");
-                    Element outgoing = new Element(OUTGOING, BPMNNAMESPACE);
-                    outgoing.setText(seqFlow.getAttributeValue(ID));
-                    elem.addContent(outgoing);
-                }
-            } else {
-                // throw exception: either sourceRef attribute or referenced element does not exist
-            }
+        for (Element seqFlow : allSequenceFlows) {
+            LOGGER.debug("Checking sourceRef and targetRefs for seqFlow with ID" + seqFlow.getAttributeValue(ID));
 
-            String targetRef = seqFlow.getAttributeValue(TARGET_REF);
-            if(targetRef != null && allElementsWithIds.get(targetRef) != null) {
-                Element elem = allElementsWithIds.get(targetRef);
-                // check element regarding outgoing subelement
-                if(!elem.getChildren(INCOMING, BPMNNAMESPACE).stream()
-                        .anyMatch(e -> seqFlow.getAttributeValue(ID).equals(e.getText()))) {
-                    // if no element contains seqFlow ID
-                    // add new element with ID
-                    LOGGER.info("Adding Element incoming");
-                    Element incoming = new Element(INCOMING, BPMNNAMESPACE);
-                    incoming.setText(seqFlow.getAttributeValue(ID));
-                    elem.addContent(incoming);
-                }
-            } else {
-                // throw exception: either sourceRef attribute or referenced element does not exist
-            }
+            // Check whether element referenced by targetRef has the needed cross reference
+            hasBeenChanged = hasBeenChanged | findAndCreateElementForSeqFlowAttribute(SOURCE_REF, OUTGOING, allElementsWithIds, seqFlow);
+
+            // Check whether element referenced by targetRef has the needed cross reference
+            hasBeenChanged = hasBeenChanged | findAndCreateElementForSeqFlowAttribute(TARGET_REF, INCOMING, allElementsWithIds, seqFlow);
         }
 
-        // save fixed file
-        XMLOutputter outputter = new XMLOutputter();
-        outputter.setFormat(Format.getPrettyFormat());
-        outputter.output(doc, new FileOutputStream(Paths.get(path.toString()+"_fixed").toFile()));
+
+        if (hasBeenChanged) {
+            // save fixed file
+            LOGGER.info("File was incorrect. Creating new file with fixed sequenceFlow references.");
+            Path newFile = path.getParent().resolve("fixed_" + path.getFileName().toString());
+            XMLOutputter outputter = new XMLOutputter();
+            outputter.setFormat(Format.getPrettyFormat());
+            outputter.output(doc, new FileOutputStream(newFile.toFile()));
+            LOGGER.info("File created: " + newFile.toString());
+        } else {
+            LOGGER.info("File was correct. No reference fixes needed.");
+        }
+    }
+
+    /**
+     * Method to find and (potentially) create the needed incoming/outgoing sub element
+     * <p>
+     * Method checks whether the the element referenced by the attribute value of the attribute 'seqFlowAttribute' has a
+     * subelement with the name 'elementName' which refers to the ID of the given 'seqFlow'.
+     * <p>
+     * If no such sub element can be found, the sub element is created.
+     *
+     * @param seqFlowAttribute   the sequenceFlow reference attribute to lookup (either sourceRef or targetRef)
+     * @param elementName        the name of the element to lookup/create (either incoming or outgoing)
+     * @param allElementsWithIds list of all elements with ids
+     * @param seqFlow            the sequenceFlow element which refs should be checked
+     * @return returns true if a element has been changed, false otherwise
+     */
+    private boolean findAndCreateElementForSeqFlowAttribute(String seqFlowAttribute, String elementName,
+                                                            Map<String, Element> allElementsWithIds, Element seqFlow) {
+        String attributeValue = seqFlow.getAttributeValue(seqFlowAttribute);
+        if (attributeValue != null && allElementsWithIds.get(attributeValue) != null) {
+            Element elem = allElementsWithIds.get(attributeValue);
+            // check element regarding outgoing subelement
+            if (!elem.getChildren(elementName, BPMNNAMESPACE).stream()
+                    .anyMatch(e -> seqFlow.getAttributeValue(ID).equals(e.getText()))) {
+                // if no element contains seqFlow ID
+                // add new element with ID
+                LOGGER.info("Adding SubElement '" + elementName + "' to element '" + elem.getName() + "' with ID " + attributeValue);
+                Element newSubElem = new Element(elementName, BPMNNAMESPACE);
+                newSubElem.setText(seqFlow.getAttributeValue(ID));
+                elem.addContent(newSubElem);
+                return true;
+            }
+            return false;
+        } else {
+            // throw exception: either sequenceFlow attribute or referenced element does not exist
+            throw new IllegalArgumentException("attribute '" + seqFlowAttribute + "' or referenced element for sequenceFlow "
+                    + seqFlow.getAttributeValue(ID) + "does not exist.");
+        }
     }
 
     private Document loadFile(Path path) {
-        builder.setJDOMFactory(new LocatedJDOMFactory());
 
         if (Files.notExists(path) || !Files.isRegularFile(path)) {
             String msg = "Path " + path + " is invalid.";
@@ -127,24 +162,18 @@ public class SequenceFlowSolver {
     private Map<String, Element> createIdElementMap(Document document) {
         Map<String, Element> mapOfAllElementsWithId = new ConcurrentHashMap<>();
 
-        List<Element> allElems = new ArrayList<>();
-
-        Iterator<Element> it = document.getRootElement().getDescendants(Filters.element(BPMNNAMESPACE));
-
-        while (it.hasNext()) {
-            allElems.add(it.next());
-        }
+        List<Element> allElems = getAllElementsByFilter(document, Filters.element(BPMNNAMESPACE));
 
         allElems.stream().parallel().filter(elem -> BPMNNAMESPACE.equals(elem.getNamespace()))
-                .filter(elem -> elem.getAttribute("id")!=null)
+                .filter(elem -> elem.getAttribute("id") != null)
                 .forEach(elem -> mapOfAllElementsWithId.put(elem.getAttributeValue("id"), elem));
 
         return mapOfAllElementsWithId;
     }
 
-    private List<Element> getAllSequenceFlows(Document document) {
+    private List<Element> getAllElementsByFilter(Document document, Filter<Element> filter) {
         List<Element> allElems = new ArrayList<>();
-        Iterator<Element> it = document.getRootElement().getDescendants(Filters.element(SEQ_FLOW, BPMNNAMESPACE));
+        Iterator<Element> it = document.getRootElement().getDescendants(filter);
 
         while (it.hasNext()) {
             allElems.add(it.next());
