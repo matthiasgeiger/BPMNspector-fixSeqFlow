@@ -1,13 +1,9 @@
 package de.uniba.dsg.bpmnspector.fix.seqflow;
 
-import org.jdom2.Document;
-import org.jdom2.Element;
-import org.jdom2.JDOMException;
-import org.jdom2.Namespace;
+import org.jdom2.*;
 import org.jdom2.filter.Filter;
 import org.jdom2.filter.Filters;
 import org.jdom2.input.SAXBuilder;
-import org.jdom2.located.LocatedJDOMFactory;
 import org.jdom2.output.Format;
 import org.jdom2.output.XMLOutputter;
 import org.slf4j.Logger;
@@ -17,11 +13,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * @author Matthias Geiger
@@ -42,13 +36,6 @@ public class SequenceFlowSolver {
             .getLogger(SequenceFlowSolver.class.getSimpleName());
 
 
-    private final SAXBuilder builder;
-
-    public SequenceFlowSolver() {
-        builder = new SAXBuilder();
-        builder.setJDOMFactory(new LocatedJDOMFactory());
-    }
-
     /**
      * Checks whether a BPMN file determined by the path uses the correct sequenceFlow referencing paradigm
      * defined in the BPMN spec. I.e., each element referenced by a SequenceFlow using the sourceRef or targetRef
@@ -62,12 +49,14 @@ public class SequenceFlowSolver {
      * @throws IllegalArgumentException thrown if the file at path is not a valid BPMN file
      */
     public void fixSequenceFlowFaults(Path path) throws IOException, IllegalArgumentException {
+
+        LOGGER.info("Checking file "+path.toString());
         Document doc = loadFile(path);
 
         // get all SequenceFlow elements
         List<Element> allSequenceFlows = getAllElementsByFilter(doc, Filters.element(SEQ_FLOW, BPMNNAMESPACE));
 
-        LOGGER.info("Found " + allSequenceFlows.size() + " sequenceFlow elements.");
+        LOGGER.debug("Found " + allSequenceFlows.size() + " sequenceFlow elements.");
 
         // get all Elements with IDs to be used in the following checks
         Map<String, Element> allElementsWithIds = createIdElementMap(doc);
@@ -77,7 +66,11 @@ public class SequenceFlowSolver {
         // check for each SequenceFlow element whether the referenced element cross reference the SeqFlow
         // if not - add incoming/outgoing sub element
         for (Element seqFlow : allSequenceFlows) {
-            LOGGER.debug("Checking sourceRef and targetRefs for seqFlow with ID" + seqFlow.getAttributeValue(ID));
+            if(seqFlow.getAttributeValue(ID)==null) {
+                LOGGER.error("Process is incorrect but cannot be fixed as attribute @id is missing for a SequenceFlow");
+                return;
+            }
+            LOGGER.debug("Checking sourceRef and targetRefs for seqFlow with ID " + seqFlow.getAttributeValue(ID));
 
             // Check whether element referenced by targetRef has the needed cross reference
             hasBeenChanged = hasBeenChanged | findAndCreateElementForSeqFlowAttribute(SOURCE_REF, OUTGOING, allElementsWithIds, seqFlow);
@@ -124,10 +117,20 @@ public class SequenceFlowSolver {
                     .anyMatch(e -> seqFlow.getAttributeValue(ID).equals(e.getText()))) {
                 // if no element contains seqFlow ID
                 // add new element with ID
-                LOGGER.info("Adding SubElement '" + elementName + "' to element '" + elem.getName() + "' with ID " + attributeValue);
+
                 Element newSubElem = new Element(elementName, BPMNNAMESPACE);
                 newSubElem.setText(seqFlow.getAttributeValue(ID));
-                elem.addContent(newSubElem);
+
+                int index = determineIndexForElementInsertion(elem);
+                LOGGER.debug("Determined index: "+index);
+                if(index>elem.getChildren().size()) {
+                    LOGGER.debug("Adding SubElement '" + elementName + "' to element '" + elem.getName() + "' with ID " + attributeValue+" as last SubElem");
+                    elem.addContent(newSubElem);
+                } else {
+                    LOGGER.debug("Adding SubElement '" + elementName + "' to element '" + elem.getName() + "' with ID " + attributeValue+" at Pos."+index);
+                    elem.addContent(index, newSubElem);
+                }
+
                 return true;
             }
             return false;
@@ -144,6 +147,11 @@ public class SequenceFlowSolver {
             String msg = "Path " + path + " is invalid.";
             throw new IllegalArgumentException(msg);
         } else {
+            SAXBuilder builder = new SAXBuilder();
+            builder.setIgnoringBoundaryWhitespace(true);
+            builder.setIgnoringElementContentWhitespace(true);
+            builder.setJDOMFactory(new DefaultJDOMFactory());
+
             try {
                 Document processAsDoc = builder.build(path.toFile());
                 if ("definitions".equals(processAsDoc.getRootElement().getName()) &&
@@ -164,7 +172,7 @@ public class SequenceFlowSolver {
 
         List<Element> allElems = getAllElementsByFilter(document, Filters.element(BPMNNAMESPACE));
 
-        allElems.stream().parallel().filter(elem -> BPMNNAMESPACE.equals(elem.getNamespace()))
+        allElems.stream().filter(elem -> BPMNNAMESPACE.equals(elem.getNamespace()))
                 .filter(elem -> elem.getAttribute("id") != null)
                 .forEach(elem -> mapOfAllElementsWithId.put(elem.getAttributeValue("id"), elem));
 
@@ -182,4 +190,22 @@ public class SequenceFlowSolver {
         return allElems;
     }
 
+    private int determineIndexForElementInsertion(Element parent) {
+        // Caution: Order in list is important: new Elem must be placed after last incoming element - if not present:
+        // after last categoryValueRef, etc.
+        List<String> allowedElementsBefore = Arrays.asList("incoming", "categoryValueRef", "monitoring", "auditing", "extensionElements", "documentation");
+
+        List<Element> children = parent.getChildren();
+
+        for(String str : allowedElementsBefore) {
+            List<Element> relevantElements = children.stream().filter(c -> c.getName().equals(str)).collect(Collectors.toList());
+            if(!relevantElements.isEmpty()) {
+                // use last element in list to determine index
+                LOGGER.debug("Found elem: "+str+" at Index: "+parent.indexOf(relevantElements.get(relevantElements.size()-1)));
+                return parent.indexOf(relevantElements.get(relevantElements.size()-1))+1;
+            }
+        }
+        LOGGER.debug("No Elem found - returning 0 - newElem can be placed at first place.");
+        return 0;
+    }
 }
