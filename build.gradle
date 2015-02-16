@@ -3,6 +3,8 @@ apply plugin: "idea"
 apply plugin: "eclipse"
 apply plugin: "application"
 
+mainClassName = "de.uniba.dsg.bpmnspector.fix.seqflow.Main"
+
 task wrapper(type: Wrapper) {
     gradleVersion = '2.2'
 }
@@ -31,4 +33,16 @@ dependencies {
     testCompile 'junit:junit:4.+'
 
     compile configurations.internal
+}
+
+jar.archiveName = "BPMNspector-fixSeqFlow.jar"
+
+jar {
+    manifest { attributes 'Main-Class': mainClassName }
+}
+
+run {
+    if(project.hasProperty('args')){
+        args project.args.split('\\s+')
+    }
 }
