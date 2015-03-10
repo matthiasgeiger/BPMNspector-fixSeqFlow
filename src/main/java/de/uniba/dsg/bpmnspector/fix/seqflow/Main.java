@@ -53,11 +53,15 @@ public class Main {
             } else if (Files.isDirectory(path)) {
                 List<Path> allBpmnFiles = getAllBpmnFileFromDirectory(path);
                 for (Path singleFile : allBpmnFiles) {
-                    solver.fixSequenceFlowFaults(singleFile);
+                    try {
+                        solver.fixSequenceFlowFaults(singleFile);
+                    } catch (IllegalArgumentException e) {
+                        LOGGER.error("Failed to fix: "+singleFile.toString(), e);
+                    }
                 }
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOGGER.error("Failure during analysis", e);
         }
     }
 
