@@ -67,8 +67,8 @@ public class SequenceFlowSolver {
         // if not - add incoming/outgoing sub element
         for (Element seqFlow : allSequenceFlows) {
             if(seqFlow.getAttributeValue(ID)==null) {
-                LOGGER.error("Process is incorrect but cannot be fixed as attribute @id is missing for a SequenceFlow");
-                return;
+                LOGGER.debug("Process is incorrect as attribute @id is missing for a SequenceFlow - generating a ID");
+                createSeqFlowId(seqFlow, path);
             }
             LOGGER.debug("Checking sourceRef and targetRefs for seqFlow with ID " + seqFlow.getAttributeValue(ID));
 
@@ -88,9 +88,21 @@ public class SequenceFlowSolver {
             outputter.setFormat(Format.getPrettyFormat());
             outputter.output(doc, new FileOutputStream(newFile.toFile()));
             LOGGER.info("File created: " + newFile.toString());
+            // rename original file
+            Files.move(path, path.getParent().resolve(path.getFileName().toString()+"_UNCORRECTED"));
         } else {
             LOGGER.info("File was correct. No reference fixes needed.");
         }
+    }
+
+    /**
+     * Simple method which creates and adds an ID to a SequenceFlow Element
+     *
+     * @param seqFlow the flow to be changed
+     * @param path the path of the file
+     */
+    private void createSeqFlowId(Element seqFlow, Path path) {
+        seqFlow.setAttribute("id", "id_"+String.valueOf(Math.abs(seqFlow.hashCode()+path.hashCode())));
     }
 
     /**
@@ -137,7 +149,7 @@ public class SequenceFlowSolver {
         } else {
             // throw exception: either sequenceFlow attribute or referenced element does not exist
             throw new IllegalArgumentException("attribute '" + seqFlowAttribute + "' or referenced element for sequenceFlow "
-                    + seqFlow.getAttributeValue(ID) + "does not exist.");
+                    + seqFlow.getAttributeValue(ID) + " does not exist.");
         }
     }
 
